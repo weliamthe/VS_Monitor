@@ -8,37 +8,36 @@
 #include "addons/RTDBHelper.h"
 #include "addons/TokenHelper.h"
 
-// =========================
-// WiFi configuration
-// =========================
+// WiFi
 static const char *WIFI_SSID = "TP-Link_F060 - 6307";
 static const char *WIFI_PASSWORD = "6307310706";
 
-// =========================
-// Firebase configuration
-// =========================
+// Firebase
 static const char *API_KEY = "AIzaSyBATQH6JMIHjLL6Zn5VkZ9FqnUQ_b63yGI";
-static const char *DATABASE_URL = "https://voltsafe-8ead5-default-rtdb.firebaseio.com/";
+static const char *DATABASE_URL = "https://voltsafe-8ead5-default-rtdb.firebaseio.com";
 static const char *USER_EMAIL = "esp32_1@device.local";
 static const char *USER_PASSWORD = "12345678";
 
-// =========================
-// Device configuration
-// =========================
+// Device
 static const char *DEVICE_ID = "esp32_1";
-static const uint32_t READ_INTERVAL_MS = 5000;
+static const uint32_t SEND_INTERVAL_MS = 5000;
 static const long GMT_OFFSET_SEC = 7 * 3600;
 static const int DAYLIGHT_OFFSET_SEC = 0;
 
-static const int PZEM_RX_PIN = 33; // PZEM TX -> ESP33 RX
-static const int PZEM_TX_PIN = 32; // PZEM RX -> ESP32 TX
+// Pin ESP32 ke PZEM004T
+// ESP32 RX menerima dari TX PZEM
+// ESP32 TX mengirim ke RX PZEM
+#define PZEM_RX_PIN 32
+#define PZEM_TX_PIN 33
+
+HardwareSerial pzemSerial(2);
+PZEM004Tv30 pzem(pzemSerial, PZEM_RX_PIN, PZEM_TX_PIN);
 
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
-PZEM004Tv30 pzem(Serial2, PZEM_RX_PIN, PZEM_TX_PIN);
 
-unsigned long lastReadMs = 0;
+unsigned long lastSendMs = 0;
 bool firebaseReadyLogged = false;
 
 struct MeterData {
@@ -54,7 +53,7 @@ struct MeterData {
 };
 
 String buildDevicePath(const String &suffix) {
-  String path("/devices/");
+  String path = "/devices/";
   path += DEVICE_ID;
   path += suffix;
   return path;
@@ -80,7 +79,7 @@ void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("WiFi terhubung. IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("WiFi belum terhubung, akan dicoba lagi pada loop berikutnya.");
+    Serial.println("WiFi belum terhubung, akan dicoba lagi.");
   }
 }
 
@@ -147,8 +146,7 @@ bool readPzemData(MeterData &data) {
   data.frequency = pzem.frequency();
   data.pf = pzem.pf();
 
-  if (isnan(data.voltage) || isnan(data.current) || isnan(data.power) ||
-      isnan(data.energy) || isnan(data.frequency) || isnan(data.pf)) {
+  if (isnan(data.voltage)) {
     return false;
   }
 
@@ -156,14 +154,32 @@ bool readPzemData(MeterData &data) {
 }
 
 void printMeterData(const MeterData &data) {
-  Serial.println("========== Data PZEM ==========");
-  Serial.printf("Timestamp : %s\n", data.timestamp.c_str());
-  Serial.printf("Voltage   : %.1f V\n", data.voltage);
-  Serial.printf("Current   : %.3f A\n", data.current);
-  Serial.printf("Power     : %.1f W\n", data.power);
-  Serial.printf("Energy    : %.3f kWh\n", data.energy);
-  Serial.printf("Frequency : %.1f Hz\n", data.frequency);
-  Serial.printf("PF        : %.2f\n", data.pf);
+  Serial.println("========== PZEM DATA ==========");
+  Serial.print("Voltage   : ");
+  Serial.print(data.voltage);
+  Serial.println(" V");
+
+  Serial.print("Current   : ");
+  Serial.print(data.current);
+  Serial.println(" A");
+
+  Serial.print("Power     : ");
+  Serial.print(data.power);
+  Serial.println(" W");
+
+  Serial.print("Energy    : ");
+  Serial.print(data.energy);
+  Serial.println(" kWh");
+
+  Serial.print("Frequency : ");
+  Serial.print(data.frequency);
+  Serial.println(" Hz");
+
+  Serial.print("PF        : ");
+  Serial.println(data.pf);
+
+  Serial.print("Timestamp : ");
+  Serial.println(data.timestamp);
 }
 
 void fillJson(FirebaseJson &json, const MeterData &data) {
@@ -197,12 +213,12 @@ bool uploadLog5s(const MeterData &data) {
   FirebaseJson json;
   fillJson(json, data);
 
-  String logSuffix("/logs_5s/");
-  logSuffix += data.dateKey;
-  logSuffix += "/";
-  logSuffix += data.timeKey;
+  String suffix = "/logs_5s/";
+  suffix += data.dateKey;
+  suffix += "/";
+  suffix += data.timeKey;
 
-  const String path = buildDevicePath(logSuffix);
+  const String path = buildDevicePath(suffix);
   const bool ok = Firebase.setJSON(fbdo, path.c_str(), json);
 
   if (ok) {
@@ -231,8 +247,8 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println();
-  Serial.println("ESP32 PZEM-004T -> Firebase RTDB");
+  Serial.println("ESP32 PZEM004T v4.0 -> Firebase RTDB");
+  Serial.println("Starting...");
 
   connectWiFi();
 
@@ -251,11 +267,11 @@ void loop() {
     return;
   }
 
-  if (millis() - lastReadMs < READ_INTERVAL_MS) {
+  if (millis() - lastSendMs < SEND_INTERVAL_MS) {
     delay(50);
     return;
   }
-  lastReadMs = millis();
+  lastSendMs = millis();
 
   if (!Firebase.ready()) {
     Serial.println("Firebase belum ready, upload ditunda.");
@@ -264,7 +280,8 @@ void loop() {
 
   MeterData meterData;
   if (!readPzemData(meterData)) {
-    Serial.println("Gagal membaca data PZEM atau waktu NTP belum tersedia.");
+    Serial.println("Gagal membaca data dari PZEM!");
+    Serial.println("Cek wiring RX/TX, power PZEM, koneksi AC, atau NTP.");
     return;
   }
 
@@ -274,8 +291,10 @@ void loop() {
   const bool logOk = uploadLog5s(meterData);
 
   if (realtimeOk && logOk) {
-    Serial.println("Upload Firebase selesai.\n");
+    Serial.println("Upload Firebase selesai.");
   } else {
-    Serial.println("Sebagian upload Firebase gagal.\n");
+    Serial.println("Sebagian upload Firebase gagal.");
   }
+
+  Serial.println();
 }
