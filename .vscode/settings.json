@@ -1,0 +1,8 @@
+{
+  "C_Cpp.default.configurationProvider": "platformio.platformio-ide",
+  "C_Cpp.errorSquiggles": "enabled",
+  "files.associations": {
+    "*.tcc": "cpp",
+    "*.ipp": "cpp"
+  }
+}
