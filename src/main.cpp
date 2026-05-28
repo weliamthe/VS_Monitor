@@ -2,7 +2,9 @@
 #include <WiFi.h>
 #include <time.h>
 
+#include <DallasTemperature.h>
 #include <FirebaseESP32.h>
+#include <OneWire.h>
 #include <PZEM004Tv30.h>
 
 #include "addons/RTDBHelper.h"
@@ -29,9 +31,12 @@ static const int DAYLIGHT_OFFSET_SEC = 0;
 // ESP32 TX mengirim ke RX PZEM
 #define PZEM_RX_PIN 32
 #define PZEM_TX_PIN 33
+#define DS18B20_PIN 14
 
 HardwareSerial pzemSerial(2);
 PZEM004Tv30 pzem(pzemSerial, PZEM_RX_PIN, PZEM_TX_PIN);
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature ds18b20(&oneWire);
 
 FirebaseData fbdo;
 FirebaseAuth auth;
@@ -47,6 +52,7 @@ struct MeterData {
   float energy;
   float frequency;
   float pf;
+  float temperature;
   String timestamp;
   String dateKey;
   String timeKey;
@@ -145,8 +151,14 @@ bool readPzemData(MeterData &data) {
   data.energy = pzem.energy();
   data.frequency = pzem.frequency();
   data.pf = pzem.pf();
+  ds18b20.requestTemperatures();
+  data.temperature = ds18b20.getTempCByIndex(0);
 
   if (isnan(data.voltage)) {
+    return false;
+  }
+
+  if (data.temperature == DEVICE_DISCONNECTED_C || isnan(data.temperature)) {
     return false;
   }
 
@@ -178,6 +190,10 @@ void printMeterData(const MeterData &data) {
   Serial.print("PF        : ");
   Serial.println(data.pf);
 
+  Serial.print("Temp      : ");
+  Serial.print(data.temperature);
+  Serial.println(" C");
+
   Serial.print("Timestamp : ");
   Serial.println(data.timestamp);
 }
@@ -190,6 +206,7 @@ void fillJson(FirebaseJson &json, const MeterData &data) {
   json.set("energy", data.energy);
   json.set("frequency", data.frequency);
   json.set("pf", data.pf);
+  json.set("Temperature", data.temperature);
   json.set("timestamp", data.timestamp);
 }
 
@@ -250,6 +267,7 @@ void setup() {
   Serial.println("ESP32 PZEM004T v4.0 -> Firebase RTDB");
   Serial.println("Starting...");
 
+  ds18b20.begin();
   connectWiFi();
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -280,8 +298,8 @@ void loop() {
 
   MeterData meterData;
   if (!readPzemData(meterData)) {
-    Serial.println("Gagal membaca data dari PZEM!");
-    Serial.println("Cek wiring RX/TX, power PZEM, koneksi AC, atau NTP.");
+    Serial.println("Gagal membaca data sensor!");
+    Serial.println("Cek wiring PZEM, DS18B20, koneksi AC, atau sinkronisasi waktu.");
     return;
   }
 
