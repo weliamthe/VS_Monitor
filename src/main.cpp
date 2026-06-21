@@ -10,25 +10,19 @@
 #include "addons/RTDBHelper.h"
 #include "addons/TokenHelper.h"
 
-// WiFi
-static const char *WIFI_SSID = "TP-Link_F060 - 6307";
-static const char *WIFI_PASSWORD = "6307310706";
+const char *WIFI_SSID = "CEIOT";
+const char *WIFI_PASSWORD = "CE-1OT@!";
 
-// Firebase
-static const char *API_KEY = "AIzaSyBATQH6JMIHjLL6Zn5VkZ9FqnUQ_b63yGI";
-static const char *DATABASE_URL = "https://voltsafe-8ead5-default-rtdb.firebaseio.com";
-static const char *USER_EMAIL = "esp32_1@device.local";
-static const char *USER_PASSWORD = "12345678";
+const char *API_KEY = "AIzaSyBATQH6JMIHjLL6Zn5VkZ9FqnUQ_b63yGI";
+const char *DATABASE_URL = "https://voltsafe-8ead5-default-rtdb.firebaseio.com";
+const char *USER_EMAIL = "esp32_1@device.local";
+const char *USER_PASSWORD = "12345678";
 
-// Device
-static const char *DEVICE_ID = "esp32_1";
-static const uint32_t SEND_INTERVAL_MS = 5000;
-static const long GMT_OFFSET_SEC = 7 * 3600;
-static const int DAYLIGHT_OFFSET_SEC = 0;
+const char *DEVICE_ID = "esp32_1";
+const uint32_t SEND_INTERVAL_MS = 5000;
+const long GMT_OFFSET_SEC = 7 * 3600;
+const int DAYLIGHT_OFFSET_SEC = 0;
 
-// Pin ESP32 ke PZEM004T
-// ESP32 RX menerima dari TX PZEM
-// ESP32 TX mengirim ke RX PZEM
 #define PZEM_RX_PIN 32
 #define PZEM_TX_PIN 33
 #define DS18B20_PIN 14
@@ -44,158 +38,116 @@ FirebaseConfig config;
 
 unsigned long lastSendMs = 0;
 bool firebaseReadyLogged = false;
+const uint16_t LOG_SAMPLES = 360;  // 360 x 5dtk = 30 menit
 
 struct MeterData {
-  float voltage;
-  float current;
-  float power;
-  float energy;
-  float frequency;
-  float pf;
-  float temperature;
-  String timestamp;
-  String dateKey;
-  String timeKey;
+  float voltage, current, power, energy, frequency, pf, temperature;
+  String timestamp, dateKey, timeKey;
 };
 
+struct Acc {
+  float sumV = 0, sumC = 0, sumP = 0, sumE = 0, sumF = 0, sumPF = 0, sumT = 0;
+  uint16_t n = 0;
+  String startTs;
+} acc;
+
 String buildDevicePath(const String &suffix) {
-  String path = "/devices/";
-  path += DEVICE_ID;
-  path += suffix;
-  return path;
+  return "/devices/" + String(DEVICE_ID) + suffix;
 }
 
 void connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
+  if (WiFi.status() == WL_CONNECTED) return;
 
   Serial.printf("Menghubungkan ke WiFi: %s\n", WIFI_SSID);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  uint8_t retries = 0;
-  while (WiFi.status() != WL_CONNECTED && retries < 40) {
+  for (uint8_t i = 0; WiFi.status() != WL_CONNECTED && i < 40; i++) {
     delay(500);
     Serial.print(".");
-    retries++;
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("WiFi terhubung. IP: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("WiFi belum terhubung, akan dicoba lagi.");
+    Serial.println("WiFi gagal, akan coba lagi nanti.");
   }
 }
 
-bool syncTimeWithNTP() {
+void syncTimeWithNTP() {
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, "pool.ntp.org", "time.nist.gov", "id.pool.ntp.org");
+  Serial.print("Sinkronisasi NTP");
 
-  Serial.print("Sinkronisasi waktu via NTP");
   struct tm timeInfo;
   for (uint8_t i = 0; i < 30; i++) {
     if (getLocalTime(&timeInfo, 500)) {
-      Serial.println("\nWaktu NTP berhasil disinkronkan.");
-      return true;
+      Serial.println(" OK");
+      return;
     }
-
     Serial.print(".");
     delay(500);
   }
-
-  Serial.println("\nGagal sinkronisasi NTP.");
-  return false;
+  Serial.println(" GAGAL");
 }
 
 void initFirebase() {
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
-
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
-
   config.token_status_callback = tokenStatusCallback;
 
   Firebase.reconnectWiFi(true);
   fbdo.setResponseSize(4096);
   Firebase.begin(&config, &auth);
-
-  Serial.println("Inisialisasi Firebase selesai, menunggu autentikasi.");
+  Serial.println("Firebase dimulai, menunggu autentikasi...");
 }
 
 bool getTimestampParts(String &timestamp, String &dateKey, String &timeKey) {
   struct tm timeInfo;
-  if (!getLocalTime(&timeInfo)) {
-    return false;
-  }
+  if (!getLocalTime(&timeInfo)) return false;
 
-  char tsBuffer[24];
-  char dateBuffer[11];
-  char timeBuffer[9];
+  char buf[24];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeInfo);
+  timestamp = buf;
 
-  strftime(tsBuffer, sizeof(tsBuffer), "%Y-%m-%d %H:%M:%S", &timeInfo);
-  strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", &timeInfo);
-  strftime(timeBuffer, sizeof(timeBuffer), "%H-%M-%S", &timeInfo);
+  strftime(buf, sizeof(buf), "%Y-%m-%d", &timeInfo);
+  dateKey = buf;
 
-  timestamp = String(tsBuffer);
-  dateKey = String(dateBuffer);
-  timeKey = String(timeBuffer);
+  strftime(buf, sizeof(buf), "%H-%M-%S", &timeInfo);
+  timeKey = buf;
+
   return true;
 }
 
 bool readPzemData(MeterData &data) {
-  data.voltage = pzem.voltage();
-  data.current = pzem.current();
-  data.power = pzem.power();
-  data.energy = pzem.energy();
+  data.voltage   = pzem.voltage();
+  data.current   = pzem.current();
+  data.power     = pzem.power();
+  data.energy    = pzem.energy();
   data.frequency = pzem.frequency();
-  data.pf = pzem.pf();
+  data.pf        = pzem.pf();
+
   ds18b20.requestTemperatures();
   data.temperature = ds18b20.getTempCByIndex(0);
 
-  if (isnan(data.voltage)) {
-    return false;
-  }
-
-  if (data.temperature == DEVICE_DISCONNECTED_C || isnan(data.temperature)) {
-    return false;
-  }
+  if (isnan(data.voltage)) return false;
+  if (data.temperature == DEVICE_DISCONNECTED_C || isnan(data.temperature)) return false;
 
   return getTimestampParts(data.timestamp, data.dateKey, data.timeKey);
 }
 
 void printMeterData(const MeterData &data) {
   Serial.println("========== PZEM DATA ==========");
-  Serial.print("Voltage   : ");
-  Serial.print(data.voltage);
-  Serial.println(" V");
-
-  Serial.print("Current   : ");
-  Serial.print(data.current);
-  Serial.println(" A");
-
-  Serial.print("Power     : ");
-  Serial.print(data.power);
-  Serial.println(" W");
-
-  Serial.print("Energy    : ");
-  Serial.print(data.energy);
-  Serial.println(" kWh");
-
-  Serial.print("Frequency : ");
-  Serial.print(data.frequency);
-  Serial.println(" Hz");
-
-  Serial.print("PF        : ");
-  Serial.println(data.pf);
-
-  Serial.print("Temp      : ");
-  Serial.print(data.temperature);
-  Serial.println(" C");
-
-  Serial.print("Timestamp : ");
-  Serial.println(data.timestamp);
+  Serial.printf("Voltage   : %.2f V\n", data.voltage);
+  Serial.printf("Current   : %.2f A\n", data.current);
+  Serial.printf("Power     : %.2f W\n", data.power);
+  Serial.printf("Energy    : %.2f kWh\n", data.energy);
+  Serial.printf("Frequency : %.2f Hz\n", data.frequency);
+  Serial.printf("PF        : %.2f\n", data.pf);
+  Serial.printf("Temp      : %.2f C\n", data.temperature);
+  Serial.printf("Timestamp : %s\n", data.timestamp.c_str());
 }
 
 void fillJson(FirebaseJson &json, const MeterData &data) {
@@ -210,50 +162,69 @@ void fillJson(FirebaseJson &json, const MeterData &data) {
   json.set("timestamp", data.timestamp);
 }
 
-bool uploadRealtime(const MeterData &data) {
+bool uploadToFirebase(const MeterData &data, const String &suffix) {
   FirebaseJson json;
   fillJson(json, data);
 
-  const String path = buildDevicePath("/realtime");
-  const bool ok = Firebase.setJSON(fbdo, path.c_str(), json);
+  String path = buildDevicePath(suffix);
+  bool ok = Firebase.setJSON(fbdo, path.c_str(), json);
 
-  if (ok) {
-    Serial.printf("Firebase realtime OK: %s\n", path.c_str());
-  } else {
-    Serial.printf("Firebase realtime GAGAL: %s | %s\n", path.c_str(), fbdo.errorReason().c_str());
-  }
+  if (ok)
+    Serial.printf("Firebase OK : %s\n", path.c_str());
+  else
+    Serial.printf("Firebase GAGAL: %s | %s\n", path.c_str(), fbdo.errorReason().c_str());
 
   return ok;
 }
 
-bool uploadLog5s(const MeterData &data) {
+void accumulate(const MeterData &d) {
+  if (acc.n == 0) acc.startTs = d.timestamp;
+  acc.sumV  += d.voltage;
+  acc.sumC  += d.current;
+  acc.sumP  += d.power;
+  acc.sumE  += d.energy;
+  acc.sumF  += d.frequency;
+  acc.sumPF += d.pf;
+  acc.sumT  += d.temperature;
+  acc.n++;
+}
+
+void uploadLog30m() {
+  if (acc.n == 0) return;
+
+  MeterData avg;
+  getTimestampParts(avg.timestamp, avg.dateKey, avg.timeKey);
+
+  avg.voltage     = acc.sumV  / acc.n;
+  avg.current     = acc.sumC  / acc.n;
+  avg.power       = acc.sumP  / acc.n;
+  avg.energy      = acc.sumE  / acc.n;
+  avg.frequency   = acc.sumF  / acc.n;
+  avg.pf          = acc.sumPF / acc.n;
+  avg.temperature = acc.sumT  / acc.n;
+
   FirebaseJson json;
-  fillJson(json, data);
+  fillJson(json, avg);
+  json.set("sampleCount", acc.n);
+  json.set("startTimestamp", acc.startTs);
+  json.set("endTimestamp", avg.timestamp);
 
-  String suffix = "/logs_5s/";
-  suffix += data.dateKey;
-  suffix += "/";
-  suffix += data.timeKey;
+  String path = buildDevicePath("/logs_30m/" + avg.dateKey + "/" + avg.timeKey);
+  bool ok = Firebase.setJSON(fbdo, path.c_str(), json);
 
-  const String path = buildDevicePath(suffix);
-  const bool ok = Firebase.setJSON(fbdo, path.c_str(), json);
+  if (ok)
+    Serial.printf("Firebase logs_30m OK : %s (%d sample)\n", path.c_str(), acc.n);
+  else
+    Serial.printf("Firebase logs_30m GAGAL: %s | %s\n", path.c_str(), fbdo.errorReason().c_str());
 
-  if (ok) {
-    Serial.printf("Firebase logs_5s OK: %s\n", path.c_str());
-  } else {
-    Serial.printf("Firebase logs_5s GAGAL: %s | %s\n", path.c_str(), fbdo.errorReason().c_str());
-  }
-
-  return ok;
+  acc = Acc();
 }
 
 void ensureConnections() {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
-  }
+  if (WiFi.status() != WL_CONNECTED) connectWiFi();
 
   if (Firebase.ready() && !firebaseReadyLogged) {
-    Serial.println("Firebase siap digunakan.");
+    Serial.println("Firebase siap.");
     firebaseReadyLogged = true;
   } else if (!Firebase.ready()) {
     firebaseReadyLogged = false;
@@ -263,17 +234,12 @@ void ensureConnections() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-
   Serial.println("ESP32 PZEM004T v4.0 -> Firebase RTDB");
-  Serial.println("Starting...");
 
   ds18b20.begin();
   connectWiFi();
 
-  if (WiFi.status() == WL_CONNECTED) {
-    syncTimeWithNTP();
-  }
-
+  if (WiFi.status() == WL_CONNECTED) syncTimeWithNTP();
   initFirebase();
 }
 
@@ -292,27 +258,26 @@ void loop() {
   lastSendMs = millis();
 
   if (!Firebase.ready()) {
-    Serial.println("Firebase belum ready, upload ditunda.");
+    Serial.println("Firebase belum ready, tunda upload.");
     return;
   }
 
-  MeterData meterData;
-  if (!readPzemData(meterData)) {
-    Serial.println("Gagal membaca data sensor!");
-    Serial.println("Cek wiring PZEM, DS18B20, koneksi AC, atau sinkronisasi waktu.");
+  MeterData d;
+  if (!readPzemData(d)) {
+    Serial.println("Gagal baca sensor! Cek wiring PZEM/DS18B20.");
     return;
   }
 
-  printMeterData(meterData);
+  printMeterData(d);
 
-  const bool realtimeOk = uploadRealtime(meterData);
-  const bool logOk = uploadLog5s(meterData);
+  bool ok = uploadToFirebase(d, "/realtime");
+  accumulate(d);
 
-  if (realtimeOk && logOk) {
-    Serial.println("Upload Firebase selesai.");
-  } else {
-    Serial.println("Sebagian upload Firebase gagal.");
+  if (acc.n >= LOG_SAMPLES) {
+    uploadLog30m();
   }
 
+  Serial.printf("Realtime: %s | Akumulator: %d/%d\n",
+                ok ? "OK" : "GAGAL", acc.n, LOG_SAMPLES);
   Serial.println();
 }
