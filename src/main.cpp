@@ -11,8 +11,8 @@
 #include "addons/TokenHelper.h"
 
 // Kredensial koneksi jaringan WiFi yang dipakai ESP32 untuk akses internet.
-const char *WIFI_SSID = "TP-Link_F060 - 6307";
-const char *WIFI_PASSWORD = "6307310706";
+const char *WIFI_SSID = "SSID";
+const char *WIFI_PASSWORD = "Password";
 
 // Konfigurasi autentikasi Firebase Realtime Database.
 const char *API_KEY = "AIzaSyBATQH6JMIHjLL6Zn5VkZ9FqnUQ_b63yGI";
